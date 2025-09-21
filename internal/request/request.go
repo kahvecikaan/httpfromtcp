@@ -1,10 +1,16 @@
 package request
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"strings"
+)
+
+type ParserState int
+
+const (
+	stateInitialized ParserState = iota
+	stateDone
 )
 
 type RequestLine struct {
@@ -15,6 +21,33 @@ type RequestLine struct {
 
 type Request struct {
 	RequestLine RequestLine
+	state       ParserState
+}
+
+func NewRequest() *Request {
+	return &Request{state: stateInitialized}
+}
+
+func (r *Request) parse(data []byte) (int, error) {
+	switch r.state {
+	case stateInitialized:
+		rl, bytesConsumed, err := parseRequestLine(string(data))
+		if err != nil {
+			return 0, err
+		}
+
+		if bytesConsumed == 0 {
+			return 0, nil
+		}
+
+		r.RequestLine = *rl
+		r.state = stateDone
+		return bytesConsumed, nil
+	case stateDone:
+		return 0, fmt.Errorf("trying to read data in done state")
+	default:
+		return 0, fmt.Errorf("unknown parser state")
+	}
 }
 
 var ErrorMalformedReqLine = fmt.Errorf("malformed request-line")
@@ -22,7 +55,8 @@ var ErrorInvalidMethod = fmt.Errorf("invalid method")
 var ErrorUnsupportedHttpVer = fmt.Errorf("unsupported http version")
 var ErrorInvalidHttpFormat = fmt.Errorf("invalid http version format")
 var IncompleteStartLine = fmt.Errorf("incomplete start line")
-var SEPARATOR = "\r\n"
+var crlf = "\r\n"
+var bufferSize = 1024
 
 func validateMethod(method string) error {
 	if len(method) == 0 {
@@ -56,26 +90,25 @@ func validateHttpVersion(version string) error {
 	return nil
 }
 
-func parseRequestLine(msg string) (*RequestLine, string, error) {
-	idx := strings.Index(msg, SEPARATOR)
+func parseRequestLine(msg string) (*RequestLine, int, error) {
+	idx := strings.Index(msg, crlf)
 	if idx == -1 {
-		return nil, msg, IncompleteStartLine
+		return nil, 0, nil
 	}
 
-	startLine := msg[:idx]
-	restOfMsg := msg[idx+len(SEPARATOR):]
+	reqLine := msg[:idx]
 
-	parts := strings.Split(startLine, " ")
+	parts := strings.Split(reqLine, " ")
 	if len(parts) != 3 {
-		return nil, restOfMsg, ErrorMalformedReqLine
+		return nil, 0, ErrorMalformedReqLine
 	}
 
 	if err := validateMethod(parts[0]); err != nil {
-		return nil, restOfMsg, err
+		return nil, 0, err
 	}
 
 	if err := validateHttpVersion(parts[2]); err != nil {
-		return nil, restOfMsg, err
+		return nil, 0, err
 	}
 
 	versionParts := strings.Split(parts[2], "/")
@@ -86,26 +119,42 @@ func parseRequestLine(msg string) (*RequestLine, string, error) {
 		HttpVersion:   versionParts[1],
 	}
 
-	return rl, restOfMsg, nil
+	return rl, idx + len(crlf), nil
 }
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, errors.Join(
-			fmt.Errorf("unable to io.ReadAll"),
-			err,
-		)
+	req := NewRequest()
+	buf := make([]byte, bufferSize)
+	readToIdx := 0
+
+	for req.state != stateDone {
+		if readToIdx >= len(buf) {
+			newBuf := make([]byte, len(buf)*2)
+			copy(newBuf, buf)
+			buf = newBuf
+		}
+
+		n, err := reader.Read(buf[readToIdx:])
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+
+			return nil, err
+		}
+
+		readToIdx += n
+
+		bytesConsumed, err := req.parse(buf[:readToIdx])
+		if err != nil {
+			return nil, err
+		}
+
+		if bytesConsumed > 0 {
+			copy(buf, buf[bytesConsumed:readToIdx])
+			readToIdx -= bytesConsumed
+		}
 	}
 
-	str := string(data)
-	rl, _, err := parseRequestLine(str)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &Request{
-		RequestLine: *rl,
-	}, nil
+	return req, nil
 }
