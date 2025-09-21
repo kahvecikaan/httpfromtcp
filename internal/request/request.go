@@ -1,6 +1,7 @@
 package request
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"strings"
@@ -9,8 +10,13 @@ import (
 type ParserState int
 
 const (
-	stateInitialized ParserState = iota
-	stateDone
+	StateInitialized ParserState = iota
+	StateDone
+)
+
+const (
+	CRLF       = "\r\n"
+	bufferSize = 1024
 )
 
 type RequestLine struct {
@@ -24,14 +30,23 @@ type Request struct {
 	state       ParserState
 }
 
+var (
+	ErrMalformedReqLine   = fmt.Errorf("malformed request-line")
+	ErrInvalidMethod      = fmt.Errorf("invalid method")
+	ErrUnsupportedHttpVer = fmt.Errorf("unsupported http version")
+	ErrInvalidHttpFormat  = fmt.Errorf("invalid http version format")
+	ErrParserDone         = fmt.Errorf("trying to read data in done state")
+	ErrUnknownState       = fmt.Errorf("unknown parser state")
+)
+
 func NewRequest() *Request {
-	return &Request{state: stateInitialized}
+	return &Request{state: StateInitialized}
 }
 
 func (r *Request) parse(data []byte) (int, error) {
 	switch r.state {
-	case stateInitialized:
-		rl, bytesConsumed, err := parseRequestLine(string(data))
+	case StateInitialized:
+		rl, bytesConsumed, err := parseRequestLine(data)
 		if err != nil {
 			return 0, err
 		}
@@ -41,33 +56,23 @@ func (r *Request) parse(data []byte) (int, error) {
 		}
 
 		r.RequestLine = *rl
-		r.state = stateDone
+		r.state = StateDone
 		return bytesConsumed, nil
-	case stateDone:
-		return 0, fmt.Errorf("trying to read data in done state")
+	case StateDone:
+		return 0, ErrParserDone
 	default:
-		return 0, fmt.Errorf("unknown parser state")
+		return 0, ErrUnknownState
 	}
 }
 
-var ErrorMalformedReqLine = fmt.Errorf("malformed request-line")
-var ErrorInvalidMethod = fmt.Errorf("invalid method")
-var ErrorUnsupportedHttpVer = fmt.Errorf("unsupported http version")
-var ErrorInvalidHttpFormat = fmt.Errorf("invalid http version format")
-var IncompleteStartLine = fmt.Errorf("incomplete start line")
-var crlf = "\r\n"
-var bufferSize = 1024
-
 func validateMethod(method string) error {
 	if len(method) == 0 {
-		return ErrorInvalidMethod
+		return ErrInvalidMethod
 	}
 
 	for _, char := range method {
-		// Allow uppercase letters and hyphens only
-		// This covers all standard methods (GET, POST, etc.) and reasonable extensions (CUSTOM-METHOD)
 		if !((char >= 'A' && char <= 'Z') || char == '-') {
-			return ErrorInvalidMethod
+			return ErrInvalidMethod
 		}
 	}
 	return nil
@@ -76,50 +81,56 @@ func validateMethod(method string) error {
 func validateHttpVersion(version string) error {
 	parts := strings.Split(version, "/")
 	if len(parts) != 2 {
-		return ErrorInvalidHttpFormat
+		return ErrInvalidHttpFormat
 	}
 
 	if parts[0] != "HTTP" {
-		return ErrorInvalidHttpFormat
+		return ErrInvalidHttpFormat
 	}
 
 	if parts[1] != "1.1" {
-		return ErrorUnsupportedHttpVer
+		return ErrUnsupportedHttpVer
 	}
 
 	return nil
 }
 
-func parseRequestLine(msg string) (*RequestLine, int, error) {
-	idx := strings.Index(msg, crlf)
+func parseRequestLine(data []byte) (*RequestLine, int, error) {
+	crlfBytes := []byte(CRLF)
+	idx := bytes.Index(data, crlfBytes)
 	if idx == -1 {
 		return nil, 0, nil
 	}
 
-	reqLine := msg[:idx]
+	reqLineBytes := data[:idx]
+	bytesConsumed := idx + len(crlfBytes)
 
-	parts := strings.Split(reqLine, " ")
+	parts := bytes.Split(reqLineBytes, []byte(" "))
 	if len(parts) != 3 {
-		return nil, 0, ErrorMalformedReqLine
+		return nil, 0, ErrMalformedReqLine
 	}
 
-	if err := validateMethod(parts[0]); err != nil {
+	method := string(parts[0])
+	target := string(parts[1])
+	version := string(parts[2])
+
+	if err := validateMethod(method); err != nil {
 		return nil, 0, err
 	}
 
-	if err := validateHttpVersion(parts[2]); err != nil {
+	if err := validateHttpVersion(version); err != nil {
 		return nil, 0, err
 	}
 
-	versionParts := strings.Split(parts[2], "/")
+	versionParts := strings.Split(version, "/")
 
 	rl := &RequestLine{
-		Method:        parts[0],
-		RequestTarget: parts[1],
+		Method:        method,
+		RequestTarget: target,
 		HttpVersion:   versionParts[1],
 	}
 
-	return rl, idx + len(crlf), nil
+	return rl, bytesConsumed, nil
 }
 
 func RequestFromReader(reader io.Reader) (*Request, error) {
@@ -127,7 +138,7 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 	buf := make([]byte, bufferSize)
 	readToIdx := 0
 
-	for req.state != stateDone {
+	for req.state != StateDone {
 		if readToIdx >= len(buf) {
 			newBuf := make([]byte, len(buf)*2)
 			copy(newBuf, buf)
@@ -139,7 +150,6 @@ func RequestFromReader(reader io.Reader) (*Request, error) {
 			if err == io.EOF {
 				break
 			}
-
 			return nil, err
 		}
 
