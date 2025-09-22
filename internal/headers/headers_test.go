@@ -14,7 +14,7 @@ func TestHeaderParse(t *testing.T) {
 		data := []byte("Host: localhost:42069\r\n")
 		n, done, err := headers.Parse(data)
 		require.NoError(t, err)
-		assert.Equal(t, "localhost:42069", headers["Host"])
+		assert.Equal(t, "localhost:42069", headers.Get("Host"))
 		assert.Equal(t, 23, n) // "Host: localhost:42069\r\n" = 23 bytes
 		assert.False(t, done)
 	})
@@ -25,15 +25,56 @@ func TestHeaderParse(t *testing.T) {
 		data := []byte("   Host:   localhost:42069   \r\n")
 		n, done, err := headers.Parse(data)
 		require.NoError(t, err)
-		assert.Equal(t, "localhost:42069", headers["Host"])
+		assert.Equal(t, "localhost:42069", headers.Get("Host"))
 		assert.Equal(t, 31, n)
+		assert.False(t, done)
+	})
+
+	// Test: Case insensitive headers (NEW - Assignment Requirement)
+	t.Run("Case insensitive headers", func(t *testing.T) {
+		headers := NewHeaders()
+		data := []byte("Content-Length: 100\r\n")
+		n, done, err := headers.Parse(data)
+		require.NoError(t, err)
+
+		// Should be able to get with any case variation
+		assert.Equal(t, "100", headers.Get("content-length"))
+		assert.Equal(t, "100", headers.Get("Content-Length"))
+		assert.Equal(t, "100", headers.Get("CONTENT-LENGTH"))
+		assert.Equal(t, "100", headers.Get("CoNtEnT-lEnGtH"))
+		assert.Equal(t, 21, n)
+		assert.False(t, done)
+	})
+
+	// Test: Mixed case header names become lowercase (NEW - Assignment Requirement)
+	t.Run("Mixed case header names", func(t *testing.T) {
+		headers := NewHeaders()
+		data := []byte("User-Agent: curl/7.81.0\r\n")
+		_, done, err := headers.Parse(data)
+		require.NoError(t, err)
+
+		// Verify we can access with lowercase
+		assert.Equal(t, "curl/7.81.0", headers.Get("user-agent"))
+		// Verify mixed case input still works
+		assert.Equal(t, "curl/7.81.0", headers.Get("User-Agent"))
+		assert.False(t, done)
+	})
+
+	// Test: Invalid character in header name (NEW - Assignment Requirement)
+	t.Run("Invalid character in header name", func(t *testing.T) {
+		headers := NewHeaders()
+		data := []byte("H©st: localhost:42069\r\n")
+		n, done, err := headers.Parse(data)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid character in field name")
+		assert.Equal(t, 0, n)
 		assert.False(t, done)
 	})
 
 	// Test: Valid 2 headers with existing headers
 	t.Run("Valid 2 headers with existing headers", func(t *testing.T) {
 		headers := NewHeaders()
-		headers["Existing"] = "value" // Pre-existing header
+		headers.Set("Existing", "value")
 
 		// Parse first header
 		data1 := []byte("Host: localhost:42069\r\n")
@@ -49,10 +90,10 @@ func TestHeaderParse(t *testing.T) {
 		assert.False(t, done2)
 		assert.Equal(t, 25, n2)
 
-		// Verify all headers exist
-		assert.Equal(t, "value", headers["Existing"])
-		assert.Equal(t, "localhost:42069", headers["Host"])
-		assert.Equal(t, "curl/7.81.0", headers["User-Agent"])
+		// Verify all headers exist (case insensitive access)
+		assert.Equal(t, "value", headers.Get("existing"))
+		assert.Equal(t, "localhost:42069", headers.Get("host"))
+		assert.Equal(t, "curl/7.81.0", headers.Get("user-agent"))
 	})
 
 	// Test: Valid done
@@ -63,7 +104,7 @@ func TestHeaderParse(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 2, n) // Consumed the \r\n
 		assert.True(t, done)
-		assert.Len(t, headers, 0) // No headers added
+		assert.Equal(t, "", headers.Get("anykey")) // No headers, returns empty string
 	})
 
 	// Test: Invalid spacing header
@@ -85,7 +126,7 @@ func TestHeaderParse(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 0, n) // No bytes consumed
 		assert.False(t, done)
-		assert.Len(t, headers, 0) // No headers added
+		assert.Equal(t, "", headers.Get("Host")) // No header added
 	})
 
 	// Test: Malformed header (no colon)
@@ -95,6 +136,56 @@ func TestHeaderParse(t *testing.T) {
 		n, done, err := headers.Parse(data)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "malformed header")
+		assert.Equal(t, 0, n)
+		assert.False(t, done)
+	})
+
+	// Test: Valid token characters (Additional coverage)
+	t.Run("Valid token characters", func(t *testing.T) {
+		headers := NewHeaders()
+		// Test header name with all valid special characters
+		data := []byte("X-Custom-Header_123.test~value: some-value\r\n")
+		n, done, err := headers.Parse(data)
+		require.NoError(t, err)
+		assert.Equal(t, "some-value", headers.Get("x-custom-header_123.test~value"))
+		assert.Equal(t, 44, n)
+		assert.False(t, done)
+	})
+
+	// Test: Invalid token characters (Additional coverage)
+	t.Run("Invalid token characters", func(t *testing.T) {
+		testCases := []struct {
+			name     string
+			data     string
+			expected string
+		}{
+			{"Space in name", "Invalid Header: value\r\n", " "},
+			{"Parentheses", "Header(test): value\r\n", "("},
+			{"Equals sign", "Header=test: value\r\n", "="},
+			{"Comma", "Header,test: value\r\n", ","},
+			{"Invalid character", "H©st: localhost:42069\r\n\r\n", "©"},
+		}
+
+		for _, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				headers := NewHeaders()
+				data := []byte(tc.data)
+				n, done, err := headers.Parse(data)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid character in field name")
+				assert.Equal(t, 0, n)
+				assert.False(t, done)
+			})
+		}
+	})
+
+	// Test: Empty field name (Additional coverage)
+	t.Run("Empty field name", func(t *testing.T) {
+		headers := NewHeaders()
+		data := []byte(": value\r\n")
+		n, done, err := headers.Parse(data)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "field name cannot be empty")
 		assert.Equal(t, 0, n)
 		assert.False(t, done)
 	})

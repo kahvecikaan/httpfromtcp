@@ -3,14 +3,58 @@ package headers
 import (
 	"bytes"
 	"fmt"
+	"strings"
 )
-
-type Headers map[string]string
 
 var CRLF = []byte("\r\n")
 
-func NewHeaders() Headers {
-	return map[string]string{}
+type Headers struct {
+	headers map[string]string
+}
+
+func (h *Headers) Get(key string) string {
+	return h.headers[strings.ToLower(key)]
+}
+
+func (h *Headers) Set(key, value string) {
+	h.headers[strings.ToLower(key)] = value
+}
+
+func NewHeaders() *Headers {
+	return &Headers{
+		headers: map[string]string{},
+	}
+}
+
+func isValidTokenChar(char byte) bool {
+	// ALPHA (A-Z, a-z)
+	if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') {
+		return true
+	}
+	// DIGIT (0-9)
+	if char >= '0' && char <= '9' {
+		return true
+	}
+	// Special tchar characters
+	switch char {
+	case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+		return true
+	default:
+		return false
+	}
+}
+
+func validateFieldName(name string) error {
+	if len(name) == 0 {
+		return fmt.Errorf("field name cannot be empty")
+	}
+
+	for i := 0; i < len(name); i++ {
+		if !isValidTokenChar(name[i]) {
+			return fmt.Errorf("invalid character in field name: %c", name[i])
+		}
+	}
+	return nil
 }
 
 func parseHeader(fieldLine []byte) (string, string, error) {
@@ -24,13 +68,17 @@ func parseHeader(fieldLine []byte) (string, string, error) {
 		return "", "", fmt.Errorf("invalid spacing: space before colon")
 	}
 
-	name := string(bytes.TrimSpace(parts[0]))
+	name := strings.ToLower(string(bytes.TrimSpace(parts[0])))
 	value := string(bytes.TrimSpace(parts[1]))
+
+	if err := validateFieldName(name); err != nil {
+		return "", "", err
+	}
 
 	return name, value, nil
 }
 
-func (h Headers) Parse(data []byte) (n int, done bool, err error) {
+func (h *Headers) Parse(data []byte) (n int, done bool, err error) {
 	readIdx := bytes.Index(data, CRLF)
 
 	if readIdx == 0 {
@@ -47,7 +95,7 @@ func (h Headers) Parse(data []byte) (n int, done bool, err error) {
 		return 0, false, err
 	}
 
-	h[fieldName] = fieldValue
-	
+	h.Set(fieldName, fieldValue)
+
 	return readIdx + len(CRLF), false, nil
 }
