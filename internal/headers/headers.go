@@ -17,7 +17,13 @@ func (h *Headers) Get(key string) string {
 }
 
 func (h *Headers) Set(key, value string) {
-	h.headers[strings.ToLower(key)] = value
+	key = strings.ToLower(key)
+
+	if v, ok := h.headers[key]; ok {
+		h.headers[key] = fmt.Sprintf("%s, %s", v, value)
+	} else {
+		h.headers[key] = value
+	}
 }
 
 func NewHeaders() *Headers {

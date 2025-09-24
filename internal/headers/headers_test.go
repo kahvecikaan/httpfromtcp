@@ -189,4 +189,29 @@ func TestHeaderParse(t *testing.T) {
 		assert.Equal(t, 0, n)
 		assert.False(t, done)
 	})
+
+	// Test: Multiple values for the same header
+	t.Run("Multiple values for same header", func(t *testing.T) {
+		headers := NewHeaders()
+		headers.Set("Set-Person", "lane-loves-go") // Initial value
+
+		// Parse a header with the same key
+		data := []byte("Set-Person: prime-loves-zig\r\n")
+		n, done, err := headers.Parse(data)
+		require.NoError(t, err)
+
+		// Should combine with comma and space
+		assert.Equal(t, "lane-loves-go, prime-loves-zig", headers.Get("Set-Person"))
+		assert.Equal(t, 29, n) // "Set-Person: prime-loves-zig\r\n" = 29 bytes
+		assert.False(t, done)
+
+		// Parse another header with the same key
+		data2 := []byte("Set-Person: tj-loves-ocaml\r\n")
+		_, done2, err2 := headers.Parse(data2)
+		require.NoError(t, err2)
+
+		// Should now have all three values
+		assert.Equal(t, "lane-loves-go, prime-loves-zig, tj-loves-ocaml", headers.Get("Set-Person"))
+		assert.False(t, done2)
+	})
 }
