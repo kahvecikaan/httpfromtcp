@@ -194,3 +194,163 @@ func TestRequestLineParseStreaming(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "/search?q=test&limit=10", r.RequestLine.RequestTarget)
 }
+
+func TestParseHeaders(t *testing.T) {
+	// Test: Standard Headers
+	t.Run("Standard Headers", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\nHost: localhost:42069\r\nUser-Agent: curl/7.81.0\r\nAccept: */*\r\n\r\n",
+			numBytesPerRead: 3,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		assert.Equal(t, "localhost:42069", r.Headers.Get("host"))
+		assert.Equal(t, "curl/7.81.0", r.Headers.Get("user-agent"))
+		assert.Equal(t, "*/*", r.Headers.Get("accept"))
+	})
+
+	// Test: Empty Headers
+	t.Run("Empty Headers", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\n\r\n",
+			numBytesPerRead: 5,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		// Verify request line was parsed
+		assert.Equal(t, "GET", r.RequestLine.Method)
+		assert.Equal(t, "/", r.RequestLine.RequestTarget)
+		// Verify no headers exist
+		assert.Equal(t, "", r.Headers.Get("host"))
+		assert.Equal(t, "", r.Headers.Get("content-length"))
+	})
+
+	// Test: Malformed Header
+	t.Run("Malformed Header", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\nHost localhost:42069\r\n\r\n",
+			numBytesPerRead: 3,
+		}
+		_, err := RequestFromReader(reader)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "malformed header")
+	})
+
+	// Test: Duplicate Headers
+	t.Run("Duplicate Headers", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\nSet-Cookie: session=abc\r\nSet-Cookie: user=xyz\r\nSet-Cookie: theme=dark\r\n\r\n",
+			numBytesPerRead: 10,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		// Should combine all values with comma separation
+		assert.Equal(t, "session=abc, user=xyz, theme=dark", r.Headers.Get("set-cookie"))
+	})
+
+	// Test: Case Insensitive Headers
+	t.Run("Case Insensitive Headers", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n",
+			numBytesPerRead: 7,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		// Should be accessible with any case variation
+		assert.Equal(t, "100", r.Headers.Get("content-length"))
+		assert.Equal(t, "100", r.Headers.Get("Content-Length"))
+		assert.Equal(t, "100", r.Headers.Get("CONTENT-LENGTH"))
+		assert.Equal(t, "application/json", r.Headers.Get("content-type"))
+		assert.Equal(t, "application/json", r.Headers.Get("Content-Type"))
+	})
+
+	// Test: Missing End of Headers
+	t.Run("Missing End of Headers", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: curl\r\n",
+			numBytesPerRead: 5,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		// Parser should parse what it can without erroring
+		assert.Equal(t, "GET", r.RequestLine.Method)
+		assert.Equal(t, "localhost", r.Headers.Get("host"))
+		assert.Equal(t, "curl", r.Headers.Get("user-agent"))
+		// State should not be done since we never got the empty line
+	})
+
+	// Test: Headers with various chunk sizes
+	t.Run("Headers with various chunk sizes", func(t *testing.T) {
+		data := "POST /api HTTP/1.1\r\nHost: example.com\r\nContent-Type: application/json\r\nContent-Length: 42\r\n\r\n"
+		chunkSizes := []int{1, 3, 7, 15, 50}
+
+		for _, chunkSize := range chunkSizes {
+			t.Run(fmt.Sprintf("ChunkSize_%d", chunkSize), func(t *testing.T) {
+				reader := &chunkReader{
+					data:            data,
+					numBytesPerRead: chunkSize,
+				}
+				r, err := RequestFromReader(reader)
+				require.NoError(t, err)
+				assert.Equal(t, "POST", r.RequestLine.Method)
+				assert.Equal(t, "example.com", r.Headers.Get("host"))
+				assert.Equal(t, "application/json", r.Headers.Get("content-type"))
+				assert.Equal(t, "42", r.Headers.Get("content-length"))
+			})
+		}
+	})
+
+	// Test: Header with invalid character
+	t.Run("Header with invalid character", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\nH©st: localhost\r\n\r\n",
+			numBytesPerRead: 10,
+		}
+		_, err := RequestFromReader(reader)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid character in field name")
+	})
+
+	// Test: Header with space before colon
+	t.Run("Header with space before colon", func(t *testing.T) {
+		reader := &chunkReader{
+			data:            "GET / HTTP/1.1\r\nHost : localhost\r\n\r\n",
+			numBytesPerRead: 8,
+		}
+		_, err := RequestFromReader(reader)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "space before colon")
+	})
+
+	// Test: Many headers
+	t.Run("Many headers", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "GET /api HTTP/1.1\r\n" +
+				"Host: example.com\r\n" +
+				"User-Agent: test-client/1.0\r\n" +
+				"Accept: application/json\r\n" +
+				"Accept-Encoding: gzip, deflate\r\n" +
+				"Accept-Language: en-US\r\n" +
+				"Authorization: Bearer token123\r\n" +
+				"Cache-Control: no-cache\r\n" +
+				"Connection: keep-alive\r\n" +
+				"\r\n",
+			numBytesPerRead: 20,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		assert.Equal(t, "example.com", r.Headers.Get("host"))
+		assert.Equal(t, "test-client/1.0", r.Headers.Get("user-agent"))
+		assert.Equal(t, "application/json", r.Headers.Get("accept"))
+		assert.Equal(t, "gzip, deflate", r.Headers.Get("accept-encoding"))
+		assert.Equal(t, "en-US", r.Headers.Get("accept-language"))
+		assert.Equal(t, "Bearer token123", r.Headers.Get("authorization"))
+		assert.Equal(t, "no-cache", r.Headers.Get("cache-control"))
+		assert.Equal(t, "keep-alive", r.Headers.Get("connection"))
+	})
+}

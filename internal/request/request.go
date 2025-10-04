@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/kahvecikaan/httpfromtcp/internal/headers"
 )
 
 type ParserState int
 
 const (
 	StateInitialized ParserState = iota
+	StateHeaders
 	StateDone
 )
 
@@ -27,6 +30,7 @@ type RequestLine struct {
 
 type Request struct {
 	RequestLine RequestLine
+	Headers     headers.Headers
 	state       ParserState
 }
 
@@ -40,10 +44,13 @@ var (
 )
 
 func NewRequest() *Request {
-	return &Request{state: StateInitialized}
+	return &Request{
+		Headers: *headers.NewHeaders(),
+		state:   StateInitialized,
+	}
 }
 
-func (r *Request) parse(data []byte) (int, error) {
+func (r *Request) parseSingle(data []byte) (int, error) {
 	switch r.state {
 	case StateInitialized:
 		rl, bytesConsumed, err := parseRequestLine(data)
@@ -56,13 +63,47 @@ func (r *Request) parse(data []byte) (int, error) {
 		}
 
 		r.RequestLine = *rl
-		r.state = StateDone
+		r.state = StateHeaders
 		return bytesConsumed, nil
+
+	case StateHeaders:
+		bytesConsumed, done, err := r.Headers.Parse(data)
+		if err != nil {
+			return 0, err
+		}
+
+		if done {
+			r.state = StateDone
+		}
+
+		return bytesConsumed, nil
+
 	case StateDone:
 		return 0, ErrParserDone
+
 	default:
 		return 0, ErrUnknownState
 	}
+}
+
+func (r *Request) parse(data []byte) (int, error) {
+	totalBytesParsed := 0
+
+	for r.state != StateDone {
+		n, err := r.parseSingle(data[totalBytesParsed:])
+		if err != nil {
+			return totalBytesParsed, err
+		}
+
+		if n == 0 {
+			// need more data
+			break
+		}
+
+		totalBytesParsed += n
+	}
+
+	return totalBytesParsed, nil
 }
 
 func validateMethod(method string) error {
