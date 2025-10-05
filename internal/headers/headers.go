@@ -26,6 +26,12 @@ func (h *Headers) Set(key, value string) {
 	}
 }
 
+func (h *Headers) ForEach(fn func(key, value string)) {
+	for k, v := range h.headers {
+		fn(k, v)
+	}
+}
+
 func NewHeaders() *Headers {
 	return &Headers{
 		headers: map[string]string{},

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 
 	"github.com/kahvecikaan/httpfromtcp/internal/headers"
@@ -14,12 +15,14 @@ type ParserState int
 const (
 	StateInitialized ParserState = iota
 	StateHeaders
+	StateBody
 	StateDone
 )
 
 const (
-	CRLF       = "\r\n"
-	bufferSize = 1024
+	CRLF             = "\r\n"
+	bufferSize       = 1024
+	MaxContentLength = 10 * 1024 * 1024 // 10 MB
 )
 
 type RequestLine struct {
@@ -31,16 +34,21 @@ type RequestLine struct {
 type Request struct {
 	RequestLine RequestLine
 	Headers     headers.Headers
+	Body        []byte
 	state       ParserState
 }
 
 var (
-	ErrMalformedReqLine   = fmt.Errorf("malformed request-line")
-	ErrInvalidMethod      = fmt.Errorf("invalid method")
-	ErrUnsupportedHttpVer = fmt.Errorf("unsupported http version")
-	ErrInvalidHttpFormat  = fmt.Errorf("invalid http version format")
-	ErrParserDone         = fmt.Errorf("trying to read data in done state")
-	ErrUnknownState       = fmt.Errorf("unknown parser state")
+	ErrMalformedReqLine         = fmt.Errorf("malformed request-line")
+	ErrInvalidMethod            = fmt.Errorf("invalid method")
+	ErrUnsupportedHttpVer       = fmt.Errorf("unsupported http version")
+	ErrInvalidHttpFormat        = fmt.Errorf("invalid http version format")
+	ErrParserDone               = fmt.Errorf("trying to read data in done state")
+	ErrUnknownState             = fmt.Errorf("unknown parser state")
+	ErrInvalidContentLength     = fmt.Errorf("invalid content-length value")
+	ErrContentLengthTooLarge    = fmt.Errorf("content-length exceeds maximum allowed")
+	ErrBodyExceedsContentLength = fmt.Errorf("body length exceeds content-length")
+	ErrMultipleContentLength    = fmt.Errorf("multiple content-length values")
 )
 
 func NewRequest() *Request {
@@ -50,6 +58,34 @@ func NewRequest() *Request {
 	}
 }
 
+func (r *Request) getAndValidateContentLength() (int64, error) {
+	contentLengthStr := r.Headers.Get("content-length")
+
+	if contentLengthStr == "" {
+		return 0, nil
+	}
+
+	if strings.Contains(contentLengthStr, ",") {
+		return 0, ErrMultipleContentLength
+	}
+
+	contentLength, err := strconv.ParseInt(contentLengthStr, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %s", ErrInvalidContentLength, contentLengthStr)
+	}
+
+	if contentLength < 0 {
+		return 0, fmt.Errorf("%w: negative value %d", ErrInvalidContentLength, contentLength)
+	}
+
+	if contentLength > MaxContentLength {
+		return 0, fmt.Errorf("%w: %d bytes (max %d)",
+			ErrContentLengthTooLarge, contentLength, MaxContentLength)
+	}
+
+	return contentLength, nil
+}
+
 func (r *Request) parseSingle(data []byte) (int, error) {
 	switch r.state {
 	case StateInitialized:
@@ -57,11 +93,9 @@ func (r *Request) parseSingle(data []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-
 		if bytesConsumed == 0 {
 			return 0, nil
 		}
-
 		r.RequestLine = *rl
 		r.state = StateHeaders
 		return bytesConsumed, nil
@@ -71,12 +105,33 @@ func (r *Request) parseSingle(data []byte) (int, error) {
 		if err != nil {
 			return 0, err
 		}
-
 		if done {
+			r.state = StateBody
+		}
+		return bytesConsumed, nil
+
+	case StateBody:
+		contentLength, err := r.getAndValidateContentLength()
+		if err != nil {
+			return 0, err
+		}
+
+		if contentLength == 0 {
+			r.state = StateDone
+			return 0, nil
+		}
+
+		r.Body = append(r.Body, data...)
+
+		if int64(len(r.Body)) > contentLength {
+			return 0, ErrBodyExceedsContentLength
+		}
+
+		if int64(len(r.Body)) == contentLength {
 			r.state = StateDone
 		}
 
-		return bytesConsumed, nil
+		return len(data), nil
 
 	case StateDone:
 		return 0, ErrParserDone

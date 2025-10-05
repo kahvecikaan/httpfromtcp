@@ -230,7 +230,7 @@ func TestParseHeaders(t *testing.T) {
 	// Test: Malformed Header
 	t.Run("Malformed Header", func(t *testing.T) {
 		reader := &chunkReader{
-			data:            "GET / HTTP/1.1\r\nHost localhost:42069\r\n\r\n",
+			data:            "GET / HTTP/1.1\r\nHostWithNoColonAtAll\r\n\r\n",
 			numBytesPerRead: 3,
 		}
 		_, err := RequestFromReader(reader)
@@ -352,5 +352,177 @@ func TestParseHeaders(t *testing.T) {
 		assert.Equal(t, "Bearer token123", r.Headers.Get("authorization"))
 		assert.Equal(t, "no-cache", r.Headers.Get("cache-control"))
 		assert.Equal(t, "keep-alive", r.Headers.Get("connection"))
+	})
+}
+
+func TestBodyParsing(t *testing.T) {
+	// Test: Standard Body
+	t.Run("Standard Body", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Host: localhost:42069\r\n" +
+				"Content-Length: 13\r\n" +
+				"\r\n" +
+				"hello world!\n",
+			numBytesPerRead: 3,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		assert.Equal(t, "hello world!\n", string(r.Body))
+	})
+
+	// Test: Empty Body, 0 reported content length
+	t.Run("Empty Body, 0 reported content length", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Host: localhost:42069\r\n" +
+				"Content-Length: 0\r\n" +
+				"\r\n",
+			numBytesPerRead: 5,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		assert.Equal(t, "", string(r.Body))
+		assert.Len(t, r.Body, 0)
+	})
+
+	// Test: Empty Body, no reported content length
+	t.Run("Empty Body, no reported content length", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "GET /page HTTP/1.1\r\n" +
+				"Host: localhost:42069\r\n" +
+				"\r\n",
+			numBytesPerRead: 10,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		assert.Nil(t, r.Body)
+	})
+
+	// Test: Body shorter than reported content length
+	t.Run("Body shorter than reported content length", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Host: localhost:42069\r\n" +
+				"Content-Length: 20\r\n" +
+				"\r\n" +
+				"partial content",
+			numBytesPerRead: 3,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err) // Should not error, just incomplete
+		require.NotNil(t, r)
+		// Body will contain what was received, but state won't be Done
+		assert.Equal(t, "partial content", string(r.Body))
+	})
+
+	// Test: No Content-Length but Body Exists
+	t.Run("No Content-Length but Body Exists", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Host: localhost:42069\r\n" +
+				"\r\n" +
+				"unexpected body data",
+			numBytesPerRead: 10,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		require.NotNil(t, r)
+		// Since no Content-Length, we assume no body
+		assert.Nil(t, r.Body)
+	})
+
+	// Test: Body with various chunk sizes
+	t.Run("Body with various chunk sizes", func(t *testing.T) {
+		data := "POST /api HTTP/1.1\r\n" +
+			"Content-Length: 25\r\n" +
+			"\r\n" +
+			`{"message":"hello world"}`
+
+		chunkSizes := []int{1, 3, 7, 15, 50}
+
+		for _, chunkSize := range chunkSizes {
+			t.Run(fmt.Sprintf("ChunkSize_%d", chunkSize), func(t *testing.T) {
+				reader := &chunkReader{
+					data:            data,
+					numBytesPerRead: chunkSize,
+				}
+				r, err := RequestFromReader(reader)
+				require.NoError(t, err)
+				assert.Equal(t, `{"message":"hello world"}`, string(r.Body))
+			})
+		}
+	})
+
+	// Test: Large body
+	t.Run("Large body", func(t *testing.T) {
+		bodyContent := strings.Repeat("a", 1000)
+		reader := &chunkReader{
+			data: "POST /upload HTTP/1.1\r\n" +
+				"Content-Length: 1000\r\n" +
+				"\r\n" +
+				bodyContent,
+			numBytesPerRead: 50,
+		}
+		r, err := RequestFromReader(reader)
+		require.NoError(t, err)
+		assert.Equal(t, bodyContent, string(r.Body))
+		assert.Len(t, r.Body, 1000)
+	})
+
+	// Test: Invalid Content-Length (non-numeric)
+	t.Run("Invalid Content-Length non-numeric", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Content-Length: not-a-number\r\n" +
+				"\r\n",
+			numBytesPerRead: 10,
+		}
+		_, err := RequestFromReader(reader)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid content-length")
+	})
+
+	// Test: Negative Content-Length
+	t.Run("Negative Content-Length", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Content-Length: -100\r\n" +
+				"\r\n",
+			numBytesPerRead: 10,
+		}
+		_, err := RequestFromReader(reader)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "negative value")
+	})
+
+	// Test: Content-Length too large
+	t.Run("Content-Length exceeds maximum", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Content-Length: 999999999999\r\n" +
+				"\r\n",
+			numBytesPerRead: 10,
+		}
+		_, err := RequestFromReader(reader)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum")
+	})
+
+	// Test: Multiple Content-Length headers
+	t.Run("Multiple Content-Length headers", func(t *testing.T) {
+		reader := &chunkReader{
+			data: "POST /submit HTTP/1.1\r\n" +
+				"Content-Length: 10\r\n" +
+				"Content-Length: 20\r\n" +
+				"\r\n",
+			numBytesPerRead: 10,
+		}
+		_, err := RequestFromReader(reader)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "multiple content-length")
 	})
 }
