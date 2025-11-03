@@ -12,7 +12,7 @@ type Server struct {
 	closed   atomic.Bool
 }
 
-func Serve(port int) (*Server, error) {
+func Serve(port uint16) (*Server, error) {
 	addr := fmt.Sprintf(":%d", port)
 
 	listener, err := net.Listen("tcp", addr)
@@ -54,7 +54,6 @@ func (s *Server) handle(conn net.Conn) {
 
 	response := "HTTP/1.1 200 OK\r\n" +
 		"Content-Type: text/plain\r\n" +
-		"Content-Length: 13\r\n" +
 		"\r\n" +
 		"Hello, World!"
 
